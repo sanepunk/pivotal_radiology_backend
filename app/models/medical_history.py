@@ -33,11 +33,14 @@ class Procedure(BaseModel):
 
 class FileReference(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    patient_uid: str
     file_type: str  # e.g., "xray", "lab_report", "prescription"
     file_name: str
     file_path: str
     upload_date: datetime = Field(default_factory=datetime.utcnow)
     notes: Optional[str]
+    uploaded_by: str
+    doctor_name: str
 
     model_config = ConfigDict(populate_by_name=True, json_encoders={ObjectId: str})
 
