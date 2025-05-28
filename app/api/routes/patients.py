@@ -78,7 +78,13 @@ async def get_patients(
     db = Depends(get_db)
 ):
     try:
-        patients = await db["patients"].find().to_list(length=None)
+        # If user is admin, return all patients
+        if current_user.role == "admin":
+            patients = await db["patients"].find().to_list(length=None)
+        else:
+            # If user is doctor, return only their patients
+            patients = await db["patients"].find({"created_by": current_user.email}).to_list(length=None)
+        
         return [PatientResponse(**patient) for patient in patients]
     except Exception as e:
         raise HTTPException(
@@ -95,6 +101,11 @@ async def get_patient(
     patient = await db["patients"].find_one({"uid": uid})
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+    
+    # Check if user has access to this patient
+    if current_user.role != "admin" and patient["created_by"] != current_user.email:
+        raise HTTPException(status_code=403, detail="Not authorized to view this patient")
+    
     return PatientResponse(**patient)
 
 @router.put("/{uid}", response_model=PatientResponse)
@@ -151,63 +162,96 @@ async def add_visit(
 async def upload_file(
     file: UploadFile = File(...),
     patientUid: str = Form(...),
-    notes: str = Form(None),
     doctor_name: str = Form(...),
+    notes: Optional[str] = Form(default=None),
     current_user: UserInDB = Depends(get_current_user),
     db = Depends(get_db)
 ):
-    # Verify patient exists
-    patient = await db["patients"].find_one({"uid": patientUid})
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
+    try:
+        # Debug logging
+        print(f"Received upload request - patientUid: {patientUid}, doctor_name: {doctor_name}")
+        print(f"File info - filename: {file.filename}, content_type: {file.content_type}")
+        
+        # Verify patient exists
+        patient = await db["patients"].find_one({"uid": patientUid})
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient with UID {patientUid} not found")
 
-    # Validate file type
-    allowed_types = {
-        'image/png': 'xray',
-        'image/jpeg': 'xray',
-        'application/dicom': 'xray',
-        'application/pdf': 'report'
-    }
-    
-    if file.content_type not in allowed_types:
+        # Validate file type
+        allowed_types = {
+            'image/png': 'xray',
+            'image/jpeg': 'xray',
+            'image/jpg': 'xray',
+            'application/dicom': 'xray',
+            'application/pdf': 'report'
+        }
+        
+        if file.content_type not in allowed_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type: {file.content_type}. Allowed types are: {', '.join(allowed_types.keys())}"
+            )
+
+        # Create a unique filename
+        timestamp = datetime.utcnow().timestamp()
+        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._-")
+        filename = f"{patientUid}_{timestamp}_{safe_filename}"
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        
+        try:
+            # Save the file
+            content = await file.read()
+            with open(file_path, "wb") as buffer:
+                buffer.write(content)
+            
+            # Create file reference
+            file_data = {
+                "patient_uid": patientUid,
+                "file_type": allowed_types[file.content_type],
+                "file_name": filename,
+                "file_path": file_path,
+                "upload_date": datetime.utcnow(),
+                "uploaded_by": current_user.email,
+                "doctor_name": doctor_name,
+                "notes": notes
+            }
+            
+            print(f"Creating FileReference with data: {file_data}")
+            
+            # Create and validate FileReference object
+            file_ref = FileReference(**file_data)
+            
+            # Save to database
+            result = await db["files"].insert_one(file_ref.model_dump(exclude={"id"}))
+            file_ref.id = str(result.inserted_id)
+            
+            return {
+                "id": str(result.inserted_id),
+                "filename": filename,
+                "file_type": file_ref.file_type,
+                "upload_date": file_ref.upload_date,
+                "patient_uid": patientUid,
+                "doctor_name": doctor_name
+            }
+            
+        except Exception as e:
+            # Clean up the file if something goes wrong
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            print(f"Error during file processing: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error saving file: {str(e)}"
+            )
+            
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
         raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type. Allowed types are: {', '.join(allowed_types.keys())}"
+            status_code=422,
+            detail=f"Error processing request: {str(e)}"
         )
-
-    # Create a unique filename
-    filename = f"{patientUid}_{datetime.utcnow().timestamp()}_{file.filename}"
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    
-    # Save the file
-    with open(file_path, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
-    
-    # Create file reference
-    file_ref = FileReference(
-        file_name=filename,
-        file_path=filename,  # Store just the filename
-        file_type=allowed_types[file.content_type],
-        upload_date=datetime.utcnow(),
-        uploaded_by=current_user.email,
-        patient_uid=patientUid,
-        doctor_name=doctor_name,
-        notes=notes
-    )
-    
-    # Save file reference to database
-    result = await db["files"].insert_one(file_ref.dict(exclude={"id"}))
-    file_ref.id = str(result.inserted_id)
-    
-    return {
-        "id": file_ref.id,
-        "filename": filename,
-        "file_type": file_ref.file_type,
-        "upload_date": file_ref.upload_date,
-        "patient_uid": patientUid,
-        "doctor_name": doctor_name
-    }
 
 @router.get("/files/{file_id}")
 async def get_file(
@@ -223,9 +267,24 @@ async def get_file(
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
     
+    # Determine content type based on file type
+    content_type = None
+    if file_ref["file_type"] == "xray":
+        if file_path.lower().endswith(('.jpg', '.jpeg')):
+            content_type = "image/jpeg"
+        elif file_path.lower().endswith('.png'):
+            content_type = "image/png"
+        elif file_path.lower().endswith('.dcm'):
+            content_type = "application/dicom"
+    elif file_ref["file_type"] == "report":
+        content_type = "application/pdf"
+    
+    if not content_type:
+        content_type = "application/octet-stream"
+    
     return FileResponse(
         file_path,
-        media_type="image/jpeg" if file_path.endswith(('.jpg', '.jpeg')) else "image/png",
+        media_type=content_type,
         filename=file_ref["file_name"]
     )
 
@@ -235,8 +294,15 @@ async def get_patient_files(
     current_user: UserInDB = Depends(get_current_user),
     db = Depends(get_db)
 ):
+    # First check if user has access to this patient
+    patient = await db["patients"].find_one({"uid": uid})
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    if current_user.role != "admin" and patient["created_by"] != current_user.email:
+        raise HTTPException(status_code=403, detail="Not authorized to view this patient's files")
+    
     files = await db["files"].find({"patient_uid": uid}).to_list(None)
-    # Convert ObjectId to string and format the response
     formatted_files = []
     for file in files:
         file['_id'] = str(file['_id'])

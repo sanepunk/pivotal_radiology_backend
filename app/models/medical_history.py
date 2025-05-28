@@ -33,16 +33,20 @@ class Procedure(BaseModel):
 
 class FileReference(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    patient_uid: str
-    file_type: str  # e.g., "xray", "lab_report", "prescription"
-    file_name: str
-    file_path: str
+    patient_uid: str = Field(..., description="Patient's unique identifier")
+    file_type: str = Field(..., description="Type of file (e.g., xray, report)")
+    file_name: str = Field(..., description="Original file name")
+    file_path: str = Field(..., description="Path where file is stored")
     upload_date: datetime = Field(default_factory=datetime.utcnow)
-    notes: Optional[str]
-    uploaded_by: str
-    doctor_name: str
+    notes: Optional[str] = None
+    uploaded_by: str = Field(..., description="Email of user who uploaded the file")
+    doctor_name: str = Field(..., description="Name of the doctor")
 
-    model_config = ConfigDict(populate_by_name=True, json_encoders={ObjectId: str})
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_encoders={ObjectId: str},
+        from_attributes=True
+    )
 
 class VisitHistory(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")

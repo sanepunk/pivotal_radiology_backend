@@ -5,7 +5,7 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from app.core.config import settings
-from app.models.user import UserCreate, UserInDB, UserLogin, Token, TokenData
+from app.models.user import UserCreate, UserInDB, UserLogin, Token, TokenData, UserBase
 from app.api.dependencies import get_db
 
 router = APIRouter()
@@ -114,3 +114,35 @@ async def verify_token(current_user: UserInDB = Depends(get_current_user)):
         "name": current_user.name,
         "role": current_user.role
     }
+
+@router.get("/doctors", response_model=list[UserBase])
+async def get_doctors(
+    current_user: UserInDB = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin can view doctor list"
+        )
+    
+    doctors = await db["users"].find({"role": "doctor"}).to_list(None)
+    return [UserBase(**doctor) for doctor in doctors]
+
+@router.delete("/doctors/{email}")
+async def delete_doctor(
+    email: str,
+    current_user: UserInDB = Depends(get_current_user),
+    db = Depends(get_db)
+):
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admin can delete doctors"
+        )
+    
+    result = await db["users"].delete_one({"email": email, "role": "doctor"})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    
+    return {"message": "Doctor deleted successfully"}
