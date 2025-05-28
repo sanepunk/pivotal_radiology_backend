@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from typing import Optional, List, Any
 from datetime import datetime
 from bson import ObjectId
 
@@ -15,8 +15,10 @@ class PyObjectId(ObjectId):
         return ObjectId(v)
 
     @classmethod
-    def __modify_schema__(cls, field_schema):
-        field_schema.update(type="string")
+    def __get_pydantic_json_schema__(cls, core_schema: Any, handler: Any) -> dict[str, Any]:
+        json_schema = handler(core_schema)
+        json_schema.update(type="string")
+        return json_schema
 
 class ImageAnalysis(BaseModel):
     status: str = Field(..., description="Status of the analysis")
@@ -28,6 +30,8 @@ class PatientImage(BaseModel):
     url: str
     uploadedAt: datetime = Field(default_factory=datetime.utcnow)
     analysis: Optional[ImageAnalysis] = None
+
+    model_config = ConfigDict(populate_by_name=True, json_encoders={ObjectId: str})
 
 class PatientBase(BaseModel):
     name: str
@@ -48,9 +52,7 @@ class PatientInDB(PatientBase):
     updatedAt: datetime = Field(default_factory=datetime.utcnow)
     images: List[PatientImage] = Field(default_factory=list)
 
-    class Config:
-        json_encoders = {ObjectId: str}
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True, json_encoders={ObjectId: str})
 
 class PatientUpdate(BaseModel):
     name: Optional[str] = None
@@ -63,4 +65,45 @@ class PatientUpdate(BaseModel):
     location: Optional[str] = None
 
 class PatientResponse(PatientInDB):
-    pass 
+    pass
+
+class Insurance(BaseModel):
+    provider: Optional[str] = None
+    policy_number: Optional[str] = None
+    expiry_date: Optional[datetime] = None
+
+class Contact(BaseModel):
+    phone: str
+    email: Optional[str]
+    address: str
+    emergency_contact: Optional[str]
+
+class MedicalCondition(BaseModel):
+    condition: str
+    diagnosed_date: datetime
+    status: str = "Active"
+    notes: Optional[str]
+
+class Medication(BaseModel):
+    name: Optional[str] = None
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    prescribing_doctor: Optional[str] = None
+
+class Patient(BaseModel):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    uid: str = Field(...)
+    name: str = Field(...)
+    date_of_birth: datetime
+    gender: str
+    contact: Contact
+    insurance: Insurance
+    medical_conditions: List[MedicalCondition] = []
+    medications: List[Medication] = []
+    allergies: List[str] = []
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = ConfigDict(populate_by_name=True, json_encoders={ObjectId: str}) 

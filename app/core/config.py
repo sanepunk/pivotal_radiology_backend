@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 class Settings(BaseSettings):
     # API Settings
-    API_V1_STR: str = "/api/v1"
+    # API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Pivotal TB Screening"
     load_dotenv()
     # MongoDB Settings
