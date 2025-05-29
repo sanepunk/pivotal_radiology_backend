@@ -160,9 +160,11 @@ async def add_visit(
 
 @router.post("/files/upload")
 async def upload_file(
-    file: UploadFile = File(...),
     patientUid: str = Form(...),
     doctor_name: str = Form(...),
+    file_path: str = Form(...),
+    file_name: str = Form(...),
+    file_type: str = Form(...),
     notes: Optional[str] = Form(default=None),
     current_user: UserInDB = Depends(get_current_user),
     db = Depends(get_db)
@@ -170,7 +172,7 @@ async def upload_file(
     try:
         # Debug logging
         print(f"Received upload request - patientUid: {patientUid}, doctor_name: {doctor_name}")
-        print(f"File info - filename: {file.filename}, content_type: {file.content_type}")
+        print(f"File info - filename: {file_name}, file_type: {file_type}")
         
         # Verify patient exists
         patient = await db["patients"].find_one({"uid": patientUid})
@@ -186,63 +188,42 @@ async def upload_file(
             'application/pdf': 'report'
         }
         
-        if file.content_type not in allowed_types:
+        if file_type not in allowed_types:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid file type: {file.content_type}. Allowed types are: {', '.join(allowed_types.keys())}"
+                detail=f"Invalid file type: {file_type}. Allowed types are: {', '.join(allowed_types.keys())}"
             )
 
-        # Create a unique filename
-        timestamp = datetime.utcnow().timestamp()
-        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._-")
-        filename = f"{patientUid}_{timestamp}_{safe_filename}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
+        # Create file reference
+        file_data = {
+            "patient_uid": patientUid,
+            "file_type": allowed_types[file_type],
+            "file_name": file_name,
+            "file_path": file_path,
+            "upload_date": datetime.utcnow(),
+            "uploaded_by": current_user.email,
+            "doctor_name": doctor_name,
+            "notes": notes
+        }
         
-        try:
-            # Save the file
-            content = await file.read()
-            with open(file_path, "wb") as buffer:
-                buffer.write(content)
-            
-            # Create file reference
-            file_data = {
-                "patient_uid": patientUid,
-                "file_type": allowed_types[file.content_type],
-                "file_name": filename,
-                "file_path": file_path,
-                "upload_date": datetime.utcnow(),
-                "uploaded_by": current_user.email,
-                "doctor_name": doctor_name,
-                "notes": notes
-            }
-            
-            print(f"Creating FileReference with data: {file_data}")
-            
-            # Create and validate FileReference object
-            file_ref = FileReference(**file_data)
-            
-            # Save to database
-            result = await db["files"].insert_one(file_ref.model_dump(exclude={"id"}))
-            file_ref.id = str(result.inserted_id)
-            
-            return {
-                "id": str(result.inserted_id),
-                "filename": filename,
-                "file_type": file_ref.file_type,
-                "upload_date": file_ref.upload_date,
-                "patient_uid": patientUid,
-                "doctor_name": doctor_name
-            }
-            
-        except Exception as e:
-            # Clean up the file if something goes wrong
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            print(f"Error during file processing: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error saving file: {str(e)}"
-            )
+        print(f"Creating FileReference with data: {file_data}")
+        
+        # Create and validate FileReference object
+        file_ref = FileReference(**file_data)
+        
+        # Save to database
+        result = await db["files"].insert_one(file_ref.model_dump(exclude={"id"}))
+        file_ref.id = str(result.inserted_id)
+        
+        return {
+            "id": str(result.inserted_id),
+            "filename": file_name,
+            "file_type": file_ref.file_type,
+            "upload_date": file_ref.upload_date,
+            "patient_uid": patientUid,
+            "doctor_name": doctor_name,
+            "file_path": file_path
+        }
             
     except HTTPException as he:
         raise he
@@ -263,29 +244,10 @@ async def get_file(
     if not file_ref:
         raise HTTPException(status_code=404, detail="File not found")
     
-    file_path = file_ref["file_path"]
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found on disk")
-    
-    # Determine content type based on file type
-    content_type = None
-    if file_ref["file_type"] == "xray":
-        if file_path.lower().endswith(('.jpg', '.jpeg')):
-            content_type = "image/jpeg"
-        elif file_path.lower().endswith('.png'):
-            content_type = "image/png"
-        elif file_path.lower().endswith('.dcm'):
-            content_type = "application/dicom"
-    elif file_ref["file_type"] == "report":
-        content_type = "application/pdf"
-    
-    if not content_type:
-        content_type = "application/octet-stream"
-    
-    return FileResponse(
-        file_path,
-        media_type=content_type,
-        filename=file_ref["file_name"]
+    # Return a redirect to the Supabase URL
+    return Response(
+        status_code=307,  # Temporary redirect
+        headers={"Location": file_ref["file_path"]}
     )
 
 @router.get("/{uid}/files")
