@@ -36,7 +36,8 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Frontend URL
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:8000", "http://127.0.0.1:5173", "http://localhost:8000"],  # Frontend URL
+    # allow_origins=["*"],  # Allow all origins for development; restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,6 +45,8 @@ app.add_middleware(
 
 # Create uploads directory if it doesn't exist
 UPLOAD_DIR = "uploads"  # Keep it simple with a relative path
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), '..', 'pivotal_frontend', 'dist')
+FRONTEND_DIST = os.path.abspath(FRONTEND_DIST)
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
@@ -62,3 +65,4 @@ app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
 @app.get("/")
 async def root():
     return {"message": "Welcome to Pivotal TB Screening API"}
+app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
