@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from sqlalchemy.orm import Session
+
 from app.core.config import settings
-from app.models.user import UserCreate, UserInDB, UserLogin, Token, TokenData, UserBase
-from app.api.dependencies import get_db
+from app.models.user import User, UserCreate, UserInDB, UserLogin, Token, TokenData, UserBase, UserResponse
+from app.core.database import get_db
 
 router = APIRouter()
 
@@ -27,46 +29,42 @@ def create_access_token(data: dict) -> str:
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
-async def get_user_by_email(db, email: str) -> Optional[UserInDB]:
-    user_dict = await db["users"].find_one({"email": email})
-    if user_dict:
-        return UserInDB(**user_dict)
-    return None
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    return db.query(User).filter(User.email == email).first()
 
-async def authenticate_user(db, email: str, password: str) -> Optional[UserInDB]:
-    user = await get_user_by_email(db, email)
+async def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
+    user = get_user_by_email(db, email)
     if not user:
         return None
     if not verify_password(password, user.hashed_password):
         return None
     return user
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db = Depends(get_db)) -> UserInDB:
+async def get_current_user(
+    token: str = Depends(oauth2_scheme), 
+    db: Session = Depends(get_db)
+) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        print(f"Received token: {token}")
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        print(f"Decoded payload: {payload}")
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
         token_data = TokenData(email=email)
-    except JWTError as e:
-        print(f"JWT Error: {str(e)}")
+    except JWTError:
         raise credentials_exception
         
-    user = await get_user_by_email(db, token_data.email)
+    user = get_user_by_email(db, token_data.email)
     if user is None:
-        print(f"User not found for email: {token_data.email}")
         raise credentials_exception
     return user
 
 @router.post("/register", response_model=Token)
-async def register(user_data: UserCreate, db = Depends(get_db)):
+async def register(user_data: UserCreate, db: Session = Depends(get_db)):
     # Validate passwords match
     if user_data.password != user_data.confirmPassword:
         raise HTTPException(
@@ -75,27 +73,40 @@ async def register(user_data: UserCreate, db = Depends(get_db)):
         )
 
     # Check if user already exists
-    if await get_user_by_email(db, user_data.email):
+    if get_user_by_email(db, user_data.email):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
     
     # Create new user
-    user_dict = user_data.model_dump(exclude={"password", "confirmPassword"})
-    user_dict["hashed_password"] = get_password_hash(user_data.password)
-    user_dict["created_at"] = datetime.utcnow()
-    user_dict["is_active"] = True
+    db_user = User(
+        email=user_data.email,
+        name=user_data.name,
+        role=user_data.role,
+        hashed_password=get_password_hash(user_data.password),
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+        is_active=True
+    )
     
-    # Save to database
-    await db["users"].insert_one(user_dict)
-    
-    # Create access token
-    access_token = create_access_token(data={"sub": user_data.email})
-    return Token(access_token=access_token, token_type="bearer")
+    try:
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        
+        # Create access token
+        access_token = create_access_token(data={"sub": user_data.email})
+        return Token(access_token=access_token, token_type="bearer")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 @router.post("/login", response_model=Token)
-async def login(form_data: UserLogin, db = Depends(get_db)):
+async def login(form_data: UserLogin, db: Session = Depends(get_db)):
     user = await authenticate_user(db, form_data.email, form_data.password)
     if not user:
         raise HTTPException(
@@ -107,18 +118,14 @@ async def login(form_data: UserLogin, db = Depends(get_db)):
     access_token = create_access_token(data={"sub": user.email})
     return Token(access_token=access_token, token_type="bearer")
 
-@router.get("/verify")
-async def verify_token(current_user: UserInDB = Depends(get_current_user)):
-    return {
-        "email": current_user.email,
-        "name": current_user.name,
-        "role": current_user.role
-    }
+@router.get("/verify", response_model=UserResponse)
+async def verify_token(current_user: User = Depends(get_current_user)):
+    return current_user
 
-@router.get("/doctors", response_model=list[UserBase])
+@router.get("/doctors", response_model=List[UserResponse])
 async def get_doctors(
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     if current_user.role != "admin":
         raise HTTPException(
@@ -126,14 +133,14 @@ async def get_doctors(
             detail="Only admin can view doctor list"
         )
     
-    doctors = await db["users"].find({"role": "doctor"}).to_list(None)
-    return [UserBase(**doctor) for doctor in doctors]
+    doctors = db.query(User).filter(User.role == "doctor").all()
+    return doctors
 
 @router.delete("/doctors/{email}")
 async def delete_doctor(
     email: str,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     if current_user.role != "admin":
         raise HTTPException(
@@ -141,8 +148,17 @@ async def delete_doctor(
             detail="Only admin can delete doctors"
         )
     
-    result = await db["users"].delete_one({"email": email, "role": "doctor"})
-    if result.deleted_count == 0:
+    doctor = db.query(User).filter(User.email == email, User.role == "doctor").first()
+    if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
     
-    return {"message": "Doctor deleted successfully"}
+    try:
+        db.delete(doctor)
+        db.commit()
+        return {"message": "Doctor deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )

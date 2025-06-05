@@ -1,36 +1,39 @@
-from motor.motor_asyncio import AsyncIOMotorClient
-from typing import Optional
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 import os
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# Create base directory for database if it doesn't exist
+import sys
+if getattr(sys, 'frozen', False):
+    # For packaged app, use a fixed location in user's home directory
+    base_dir = Path(os.path.expanduser("~")) / ".pivotal"
+    os.makedirs(base_dir, exist_ok=True)
+else:
+    base_dir = Path(__file__).resolve().parent.parent.parent
 
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-DATABASE_NAME = os.getenv("DATABASE_NAME", "pivotal")
+db_path = base_dir / "pivotal.db"
 
-class Database:
-    client: Optional[AsyncIOMotorClient] = None
-    db = None
+# Create SQLite database file in the project root directory
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{db_path}"
 
-    @classmethod
-    async def connect_db(cls):
-        if cls.client is None:
-            cls.client = AsyncIOMotorClient(MONGODB_URL)
-            cls.db = cls.client[DATABASE_NAME]
+# Create SQLAlchemy engine
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, 
+    connect_args={"check_same_thread": False}  # Needed for SQLite
+)
 
-    @classmethod
-    async def close_db(cls):
-        if cls.client is not None:
-            cls.client.close()
-            cls.client = None
-            cls.db = None
+# Create session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    @classmethod
-    def get_db(cls):
-        return cls.db
+# Create declarative base for models
+Base = declarative_base()
 
-def get_database():
-    if Database.db is None:
-        Database.client = AsyncIOMotorClient(MONGODB_URL)
-        Database.db = Database.client[DATABASE_NAME]
-    return Database.db 
+# Database dependency for FastAPI routes
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close() 

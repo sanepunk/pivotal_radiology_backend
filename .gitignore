@@ -9,3 +9,5 @@ __pycache__
 /uploads
 dist/
 dist1/
+*.spec
+build/

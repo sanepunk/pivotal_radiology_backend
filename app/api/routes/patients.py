@@ -1,162 +1,308 @@
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Response
-from motor.motor_asyncio import AsyncIOMotorClient
+from sqlalchemy.orm import Session
+from sqlalchemy.future import select
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 import uuid
 import os
-from bson import ObjectId
+import sys
+from pathlib import Path
 from fastapi.responses import FileResponse
+
 from ..dependencies import get_db
-from app.models.user import UserInDB
+from app.models.user import User
 from app.api.routes.auth import get_current_user
-from ...models.patient import Patient
-from ...models.medical_history import VisitHistory, FileReference
-from ...core.database import get_database
+from ...models.patient import Patient, PatientCreate, PatientInDB, PatientUpdate, PatientImageSchema, Contact, Insurance
+from ...models.medical_history import VisitHistory, FileReference, VisitHistoryCreate, VisitHistoryInDB, FileReferenceSchema
+from ...core.database import get_db
+from app.core.config import settings
 
 router = APIRouter()
-db = get_database()
 
-UPLOAD_DIR = "uploads"
+# Determine uploads directory correctly for both development and packaged environments
+if getattr(sys, 'frozen', False):
+    # We are running in a bundled app - use consistent location in user's home
+    base_dir = Path(os.path.expanduser("~")) / ".pivotal"
+    os.makedirs(base_dir, exist_ok=True)
+else:
+    # We are running in a normal Python environment
+    base_dir = Path(__file__).resolve().parent.parent.parent.parent
+
+UPLOAD_DIR = os.path.join(base_dir, 'uploads')
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
+    print(f"Created uploads directory in patients route: {UPLOAD_DIR}")
 
-class PatientBase(BaseModel):
-    name: str = Field(..., description="Patient's full name")
-    date_of_birth: str = Field(..., description="Patient's date of birth")
-    gender: str = Field(..., description="Patient's gender")
-    contact: dict = Field(..., description="Patient's contact information")
-    # email: str = Field(..., description="Patient's email")
-    address: Optional[str] = Field(None, description="Patient's address")
-    medical_history: Optional[str] = Field(None, description="Patient's medical history")
+# Compatibility model for old frontend format
+class OldPatientCreate(BaseModel):
+    name: str
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    whatsapp: Optional[str] = None
+    address: Optional[str] = None
+    location: Optional[str] = None
+    date_of_birth: Optional[datetime] = None
+    gender: Optional[str] = None
+    contact: Optional[dict] = None
+    medical_history: Optional[str] = None
 
-class PatientCreate(PatientBase):
-    pass
+# Helper function to convert SQLAlchemy model to Pydantic model
+def convert_to_pydantic(db_patient: Patient) -> PatientInDB:
+    # Extract contact from JSON
+    contact_data = db_patient.contact_info or {}
+    contact = Contact(
+        phone=contact_data.get("phone", ""),
+        email=contact_data.get("email"),
+        address=contact_data.get("address", ""),
+        emergency_contact=contact_data.get("emergency_contact")
+    )
+    
+    # Extract insurance from JSON
+    insurance_data = db_patient.insurance_info or {}
+    insurance = Insurance(
+        provider=insurance_data.get("provider"),
+        policy_number=insurance_data.get("policy_number"),
+        expiry_date=insurance_data.get("expiry_date")
+    )
+    
+    # Create Pydantic model
+    return PatientInDB(
+        id=db_patient.id,
+        uid=db_patient.uid,
+        name=db_patient.name,
+        date_of_birth=db_patient.date_of_birth,
+        gender=db_patient.gender,
+        contact=contact,
+        insurance=insurance,
+        medical_conditions=db_patient.medical_conditions or [],
+        medications=db_patient.medications or [],
+        allergies=db_patient.allergies or [],
+        created_at=db_patient.created_at,
+        updated_at=db_patient.updated_at,
+        created_by=db_patient.created_by,
+        images=[]
+    )
 
-class PatientResponse(PatientBase):
-    uid: str = Field(..., description="Patient's unique identifier")
-    created_at: datetime
-    created_by: str
-
-@router.post("/", response_model=PatientResponse)
+@router.post("/", response_model=PatientInDB)
 async def create_patient(
-    patient: PatientCreate,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    patient_data: OldPatientCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     try:
         # Generate unique patient ID
         uid = f"PTB{uuid.uuid4().hex[:8].upper()}"
         
-        # Create patient document
-        patient_dict = patient.model_dump()
-        patient_dict.update({
-            "uid": uid,
-            "created_at": datetime.now(),
-            "created_by": current_user.email
-        })
-        
-        # Save to database
-        result = await db["patients"].insert_one(patient_dict)
-        
-        if result.inserted_id:
-            return PatientResponse(**patient_dict)
+        # Handle compatibility with old frontend format
+        if hasattr(patient_data, 'contact') and patient_data.contact:
+            # New format with contact object
+            contact_info = patient_data.contact
+            gender = patient_data.gender
+            dob = patient_data.date_of_birth
         else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to create patient"
-            )
+            # Old format with separate fields
+            contact_info = {
+                "phone": patient_data.mobile or "",
+                "email": patient_data.email,
+                "address": patient_data.address or "",
+                "emergency_contact": patient_data.whatsapp
+            }
+            gender = patient_data.sex or "unknown"
+            dob = patient_data.date_of_birth or datetime.now()
+        
+        # Create patient
+        db_patient = Patient(
+            uid=uid,
+            name=patient_data.name,
+            date_of_birth=dob,
+            gender=gender,
+            contact_info=contact_info,
+            insurance_info={},
+            medical_conditions=[],
+            medications=[],
+            allergies=[],
+            created_at=datetime.utcnow(),
+            created_by=current_user.email
+        )
+        
+        db.add(db_patient)
+        db.commit()
+        db.refresh(db_patient)
+        
+        # Convert SQLAlchemy model to Pydantic model before returning
+        return convert_to_pydantic(db_patient)
+        
     except Exception as e:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
 
-@router.get("/", response_model=list[PatientResponse])
-async def get_patients(
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+@router.get("/", response_model=List[PatientInDB])
+async def get_all_patients(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     try:
-        # If user is admin, return all patients
-        if current_user.role == "admin":
-            patients = await db["patients"].find().to_list(length=None)
-        else:
-            # If user is doctor, return only their patients
-            patients = await db["patients"].find({"created_by": current_user.email}).to_list(length=None)
+        stmt = select(Patient)
         
-        return [PatientResponse(**patient) for patient in patients]
+        # If not admin, only return patients created by this user
+        if current_user.role != "admin":
+            stmt = stmt.where(Patient.created_by == current_user.email)
+            
+        patients = db.execute(stmt).scalars().all()
+        
+        # Convert all SQLAlchemy models to Pydantic models
+        return [convert_to_pydantic(patient) for patient in patients]
+        
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
 
-@router.get("/{uid}", response_model=PatientResponse)
+@router.get("/{patient_id}", response_model=PatientInDB)
 async def get_patient(
-    uid: str,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    patient_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    patient = await db["patients"].find_one({"uid": uid})
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
+    try:
+        # Check if the patient_id is a UUID or a UID
+        if len(patient_id) == 11 and patient_id.startswith("PTB"):
+            # It's a UID
+            stmt = select(Patient).where(Patient.uid == patient_id)
+        else:
+            # Assume it's an ID
+            stmt = select(Patient).where(Patient.id == patient_id)
+        
+        db_patient = db.execute(stmt).scalar_one_or_none()
+        
+        if not db_patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        return convert_to_pydantic(db_patient)
     
-    # Check if user has access to this patient
-    if current_user.role != "admin" and patient["created_by"] != current_user.email:
-        raise HTTPException(status_code=403, detail="Not authorized to view this patient")
-    
-    return PatientResponse(**patient)
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
-@router.put("/{uid}", response_model=PatientResponse)
+@router.put("/{patient_id}", response_model=PatientInDB)
 async def update_patient(
-    uid: str,
-    patient: PatientCreate,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    patient_id: str,
+    patient_data: PatientUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    patient_dict = patient.model_dump()
-    patient_dict["updated_at"] = datetime.utcnow()
-    patient_dict["updated_by"] = current_user.email
+    try:
+        # Check if the patient_id is a UUID or a UID
+        if len(patient_id) == 11 and patient_id.startswith("PTB"):
+            # It's a UID
+            stmt = select(Patient).where(Patient.uid == patient_id)
+        else:
+            # Assume it's an ID
+            stmt = select(Patient).where(Patient.id == patient_id)
+        
+        db_patient = db.execute(stmt).scalar_one_or_none()
+        
+        if not db_patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Update patient fields
+        if patient_data.name is not None:
+            db_patient.name = patient_data.name
+        if patient_data.date_of_birth is not None:
+            db_patient.date_of_birth = patient_data.date_of_birth
+        if patient_data.gender is not None:
+            db_patient.gender = patient_data.gender
+        if patient_data.contact is not None:
+            db_patient.contact_info = {
+                "phone": patient_data.contact.phone,
+                "email": patient_data.contact.email,
+                "address": patient_data.contact.address,
+                "emergency_contact": patient_data.contact.emergency_contact
+            }
+        if patient_data.insurance is not None:
+            db_patient.insurance_info = {
+                "provider": patient_data.insurance.provider,
+                "policy_number": patient_data.insurance.policy_number,
+                "expiry_date": patient_data.insurance.expiry_date
+            }
+        if patient_data.medical_conditions is not None:
+            db_patient.medical_conditions = patient_data.medical_conditions
+        if patient_data.medications is not None:
+            db_patient.medications = patient_data.medications
+        if patient_data.allergies is not None:
+            db_patient.allergies = patient_data.allergies
+        
+        db_patient.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(db_patient)
+        
+        return convert_to_pydantic(db_patient)
     
-    result = await db["patients"].update_one(
-        {"uid": uid},
-        {"$set": patient_dict}
-    )
-    if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Patient not found")
-    
-    updated_patient = await db["patients"].find_one({"uid": uid})
-    return PatientResponse(**updated_patient)
+    except Exception as e:
+        db.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
-@router.get("/{uid}/visits", response_model=List[VisitHistory])
+@router.get("/{uid}/visits", response_model=List[VisitHistoryInDB])
 async def get_patient_visits(
     uid: str,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    history = await db["visit_history"].find({"patient_uid": uid}).to_list(None)
-    return history
+    visits = db.query(VisitHistory).filter(VisitHistory.patient_uid == uid).all()
+    return visits
 
-@router.post("/{uid}/visits", response_model=VisitHistory)
+@router.post("/{uid}/visits", response_model=VisitHistoryInDB)
 async def add_visit(
     uid: str,
-    visit: VisitHistory,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    visit: VisitHistoryCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     # Verify patient exists
-    patient = await db["patients"].find_one({"uid": uid})
+    patient = db.query(Patient).filter(Patient.uid == uid).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    visit.patient_uid = uid
-    visit.created_at = datetime.utcnow()
-    visit.created_by = current_user.email
+    # Create new visit
+    db_visit = VisitHistory(
+        patient_uid=uid,
+        visit_date=visit.visit_date,
+        doctor=visit.doctor,
+        chief_complaint=visit.chief_complaint,
+        notes=visit.notes,
+        diagnoses=[diagnosis.model_dump() for diagnosis in visit.diagnoses],
+        procedures=[procedure.model_dump() for procedure in visit.procedures],
+        prescribed_medications=visit.prescribed_medications,
+        created_at=datetime.utcnow(),
+        created_by=current_user.email
+    )
     
-    result = await db["visit_history"].insert_one(visit.dict(exclude={"id"}))
-    visit.id = str(result.inserted_id)
-    return visit
+    db.add(db_visit)
+    db.commit()
+    db.refresh(db_visit)
+    return db_visit
 
 @router.post("/files/upload")
 async def upload_file(
@@ -164,16 +310,12 @@ async def upload_file(
     patientUid: str = Form(...),
     doctor_name: str = Form(...),
     notes: Optional[str] = Form(default=None),
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     try:
-        # Debug logging
-        print(f"Received upload request - patientUid: {patientUid}, doctor_name: {doctor_name}")
-        print(f"File info - filename: {file.filename}, content_type: {file.content_type}")
-        
         # Verify patient exists
-        patient = await db["patients"].find_one({"uid": patientUid})
+        patient = db.query(Patient).filter(Patient.uid == patientUid).first()
         if not patient:
             raise HTTPException(status_code=404, detail=f"Patient with UID {patientUid} not found")
 
@@ -198,6 +340,9 @@ async def upload_file(
         filename = f"{patientUid}_{timestamp}_{safe_filename}"
         file_path = os.path.join(UPLOAD_DIR, filename)
         
+        # Create URL for accessing via the /files endpoint
+        file_url = f"/files/{filename}"
+        
         try:
             # Save the file
             content = await file.read()
@@ -205,31 +350,27 @@ async def upload_file(
                 buffer.write(content)
             
             # Create file reference
-            file_data = {
-                "patient_uid": patientUid,
-                "file_type": allowed_types[file.content_type],
-                "file_name": filename,
-                "file_path": file_path,
-                "upload_date": datetime.utcnow(),
-                "uploaded_by": current_user.email,
-                "doctor_name": doctor_name,
-                "notes": notes
-            }
+            db_file = FileReference(
+                patient_uid=patientUid,
+                file_type=allowed_types[file.content_type],
+                file_name=filename,
+                file_path=file_url,  # Store URL path instead of filesystem path
+                upload_date=datetime.utcnow(),
+                uploaded_by=current_user.email,
+                doctor_name=doctor_name,
+                notes=notes
+            )
             
-            print(f"Creating FileReference with data: {file_data}")
-            
-            # Create and validate FileReference object
-            file_ref = FileReference(**file_data)
-            
-            # Save to database
-            result = await db["files"].insert_one(file_ref.model_dump(exclude={"id"}))
-            file_ref.id = str(result.inserted_id)
+            db.add(db_file)
+            db.commit()
+            db.refresh(db_file)
             
             return {
-                "id": str(result.inserted_id),
+                "id": db_file.id,
                 "filename": filename,
-                "file_type": file_ref.file_type,
-                "upload_date": file_ref.upload_date,
+                "file_url": file_url,
+                "file_type": db_file.file_type,
+                "upload_date": db_file.upload_date,
                 "patient_uid": patientUid,
                 "doctor_name": doctor_name
             }
@@ -238,7 +379,7 @@ async def upload_file(
             # Clean up the file if something goes wrong
             if os.path.exists(file_path):
                 os.remove(file_path)
-            print(f"Error during file processing: {str(e)}")
+            db.rollback()
             raise HTTPException(
                 status_code=500,
                 detail=f"Error saving file: {str(e)}"
@@ -247,36 +388,50 @@ async def upload_file(
     except HTTPException as he:
         raise he
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
         raise HTTPException(
             status_code=422,
             detail=f"Error processing request: {str(e)}"
         )
 
-@router.get("/files/{file_id}")
+@router.get("/files/{file_id}", response_model=FileReferenceSchema)
 async def get_file(
-    file_id: str,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    file_ref = await db["files"].find_one({"_id": ObjectId(file_id)})
+    file_ref = db.query(FileReference).filter(FileReference.id == file_id).first()
     if not file_ref:
         raise HTTPException(status_code=404, detail="File not found")
     
-    file_path = file_ref["file_path"]
+    return file_ref
+
+@router.get("/files/{file_id}/download")
+async def download_file(
+    file_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    file_ref = db.query(FileReference).filter(FileReference.id == file_id).first()
+    if not file_ref:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Extract the filename from the stored URL path
+    filename = os.path.basename(file_ref.file_path)
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
     
     # Determine content type based on file type
     content_type = None
-    if file_ref["file_type"] == "xray":
+    if file_ref.file_type == "xray":
         if file_path.lower().endswith(('.jpg', '.jpeg')):
             content_type = "image/jpeg"
         elif file_path.lower().endswith('.png'):
             content_type = "image/png"
         elif file_path.lower().endswith('.dcm'):
             content_type = "application/dicom"
-    elif file_ref["file_type"] == "report":
+    elif file_ref.file_type == "report":
         content_type = "application/pdf"
     
     if not content_type:
@@ -285,26 +440,22 @@ async def get_file(
     return FileResponse(
         file_path,
         media_type=content_type,
-        filename=file_ref["file_name"]
+        filename=filename
     )
 
-@router.get("/{uid}/files")
+@router.get("/{uid}/files", response_model=List[FileReferenceSchema])
 async def get_patient_files(
     uid: str,
-    current_user: UserInDB = Depends(get_current_user),
-    db = Depends(get_db)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     # First check if user has access to this patient
-    patient = await db["patients"].find_one({"uid": uid})
+    patient = db.query(Patient).filter(Patient.uid == uid).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     
-    if current_user.role != "admin" and patient["created_by"] != current_user.email:
+    if current_user.role != "admin" and patient.created_by != current_user.email:
         raise HTTPException(status_code=403, detail="Not authorized to view this patient's files")
     
-    files = await db["files"].find({"patient_uid": uid}).to_list(None)
-    formatted_files = []
-    for file in files:
-        file['_id'] = str(file['_id'])
-        formatted_files.append(file)
-    return formatted_files 
+    files = db.query(FileReference).filter(FileReference.patient_uid == uid).all()
+    return files 

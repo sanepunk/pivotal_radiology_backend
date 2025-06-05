@@ -1,59 +1,97 @@
+import sys
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from motor.motor_asyncio import AsyncIOMotorClient
-from contextlib import asynccontextmanager
-from dotenv import load_dotenv
 import os
+import shutil
+from dotenv import load_dotenv
+from pathlib import Path
 
 from app.core.config import settings
 from app.api.routes import auth, patients, analysis
-# from app.core.database import connect_to_mongo, close_mongo_connection
+from app.core.database import Base, engine
+import create_admin
 
 # Load environment variables
 load_dotenv()
 
-# MongoDB connection
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Connect to MongoDB
-    app.mongodb_client = AsyncIOMotorClient(settings.MONGODB_URL)
-    app.mongodb = app.mongodb_client[settings.MONGODB_NAME]
-    print("Connected to MongoDB")
-    yield
-    # Close MongoDB connection
-    app.mongodb_client.close()
-    print("Closed MongoDB connection")
+# Create database tables
+Base.metadata.create_all(bind=engine)
 
 # Create FastAPI app
 app = FastAPI(
     title="Pivotal TB Screening API",
     description="Backend API for TB Screening Application",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    # allow_origins=["http://localhost:5173", "http://localhost:8000", "http://127.0.0.1:8000", "http://127.0.0.1:5173"],  # Frontend URL
-    allow_origins="*",  
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Determine base directory for file storage
+# Handle both development and packaged environments
+if getattr(sys, 'frozen', False):
+    # Running as compiled executable
+    base_dir = Path(sys.executable).parent
+else:
+    # Running in development environment
+    base_dir = Path(__file__).resolve().parent
+
 # Create uploads directory if it doesn't exist
-UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'uploads'))
+UPLOAD_DIR = os.path.join(base_dir, 'uploads')
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
+    print(f"Created uploads directory at: {UPLOAD_DIR}")
+else:
+    print(f"Using existing uploads directory at: {UPLOAD_DIR}")
 
-# Add this before your app.mount statements
+# Make sure the database is in the correct location
+if getattr(sys, 'frozen', False):
+    # For packaged app, use a fixed location in user's home directory
+    HOME_DIR = os.path.expanduser("~")
+    PERSISTENT_DIR = os.path.join(HOME_DIR, '.pivotal')
+    os.makedirs(PERSISTENT_DIR, exist_ok=True)
+    DB_PATH = os.path.join(PERSISTENT_DIR, 'pivotal.db')
+    print(f"Using persistent database at: {DB_PATH}")
+else:
+    DB_PATH = os.path.join(base_dir, 'pivotal.db')
 
+DEV_DB_PATH = os.path.join(Path(__file__).resolve().parent, 'pivotal.db')
 
-FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), 'dist1'))
-# Mount the uploads directory
+# If the DB doesn't exist, copy it from dev location
+if not os.path.exists(DB_PATH) and os.path.exists(DEV_DB_PATH):
+    shutil.copy2(DEV_DB_PATH, DB_PATH)
+    print(f"Copied database from {DEV_DB_PATH} to {DB_PATH}")
+
+# Location of frontend files - handle both development and packaged environments
+if getattr(sys, 'frozen', False):
+    # For packaged app, get path from PyInstaller bundle
+    import sys
+    import os
+    
+    # This is the PyInstaller way to find bundled data
+    def resource_path(relative_path):
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+        return os.path.join(base_path, relative_path)
+    
+    FRONTEND_DIST = resource_path('dist1')
+    print(f"Using frontend files from PyInstaller bundle: {FRONTEND_DIST}")
+else:
+    # In development
+    FRONTEND_DIST = os.path.join(base_dir, 'dist1')
+    print(f"Using frontend files from: {FRONTEND_DIST}")
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     html_content = """
@@ -70,42 +108,71 @@ async def root():
     </html>
     """
     return HTMLResponse(content=html_content)
+
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(patients.router, prefix="/patients", tags=["Patients"])
 app.include_router(analysis.router, prefix="/analysis", tags=["Analysis"])
 
-# Database connection events
-# app.add_event_handler("startup", connect_to_mongo)
-# app.add_event_handler("shutdown", close_mongo_connection)
-# class CORSStaticFiles(StaticFiles):
-#     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-#         if scope["type"] == "http":
-#             response = await super().__call__(scope, receive, send)
-#             if scope["method"] == "OPTIONS":
-#                 response.headers["Access-Control-Allow-Origin"] = "*"
-#                 response.headers["Access-Control-Allow-Methods"] = "*"
-#                 response.headers["Access-Control-Allow-Headers"] = "*"
-#             return response
-#         await super().__call__(scope, receive, send)
-
-# # ...existing code...
-
-# # Update your static file mounts to use the new class
-# app.mount("/api/v1/files", CORSStaticFiles(directory=UPLOAD_DIR), name="files")
-# app.mount("/app", CORSStaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
-
 @app.exception_handler(404)
 async def spa_fallback(request: Request, exc):
     if request.url.path.startswith("/app"):
-        with open(os.path.join(FRONTEND_DIST, "index.html")) as f:
-            return HTMLResponse(content=f.read())
+        try:
+            with open(os.path.join(FRONTEND_DIST, "index.html")) as f:
+                return HTMLResponse(content=f.read())
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=404, 
+                content={"detail": f"Frontend files not found at {FRONTEND_DIST}"}
+            )
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
-app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+# Check if the uploads and frontend directories exist before mounting
+if os.path.exists(UPLOAD_DIR):
+    app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
+else:
+    print(f"WARNING: Uploads directory does not exist: {UPLOAD_DIR}")
 
-# import uvicorn
-# if __name__ == "__main__":
-#     print("Starting FastAPI app...")
-#     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False, workers=1)
+if os.path.exists(FRONTEND_DIST):
+    app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+else:
+    print(f"WARNING: Frontend directory does not exist: {FRONTEND_DIST}")
+
+import uvicorn
+
+if __name__ == "__main__":
+    import argparse
+    import socket
+    
+    # Default port to try first
+    default_port = 8000
+    
+    # Parse command line arguments if provided
+    parser = argparse.ArgumentParser(description="Start the TB Screening Application server")
+    parser.add_argument('--port', type=int, default=default_port, help='Port to run the server on')
+    args = parser.parse_args()
+    
+    # Try the specified port, if busy try alternatives (8000, 8080, 8888, 9000)
+    ports_to_try = [args.port]
+    if args.port == default_port:
+        ports_to_try.extend([8080, 8888, 9000])
+    
+    for port in ports_to_try:
+        try:
+            # Quick check if port is in use
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("127.0.0.1", port))
+            s.close()
+            
+            # Port is available, run the app
+            print(f"Starting server on port {port}")
+            print(f"Open your browser to http://localhost:{port}")
+            uvicorn.run(app, host="127.0.0.1", port=port, workers=1)
+            break
+        except OSError:
+            print(f"Port {port} is busy, trying next port...")
+            continue
+    else:
+        print("All ports are busy. Please close some applications and try again.")
+        import time
+        time.sleep(5)
