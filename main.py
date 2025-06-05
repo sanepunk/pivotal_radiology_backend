@@ -104,3 +104,8 @@ async def spa_fallback(request: Request, exc):
 
 app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
 app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+
+# import uvicorn
+# if __name__ == "__main__":
+#     print("Starting FastAPI app...")
+#     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False, workers=1)
