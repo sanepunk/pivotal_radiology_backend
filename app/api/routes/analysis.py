@@ -18,16 +18,21 @@ router = APIRouter()
 
 # Determine uploads directory correctly for both development and packaged environments
 if getattr(sys, 'frozen', False):
-    # We are running in a bundled app
-    base_dir = Path(sys.executable).parent
+    # We are running in a bundled app - use fixed location in home directory
+    HOME_DIR = os.path.expanduser("~")
+    PERSISTENT_DIR = os.path.join(HOME_DIR, '.pivotal')
+    UPLOAD_DIR = os.path.join(PERSISTENT_DIR, 'uploads')
 else:
     # We are running in a normal Python environment
     base_dir = Path(__file__).resolve().parent.parent.parent.parent
+    UPLOAD_DIR = os.path.join(base_dir, 'uploads')
 
-UPLOAD_DIR = os.path.join(base_dir, 'uploads')
+# Create directory if it doesn't exist
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
     print(f"Created uploads directory in analysis route: {UPLOAD_DIR}")
+else:
+    print(f"Using existing uploads directory in analysis route: {UPLOAD_DIR}")
 
 @router.post("/{patient_uid}/upload")
 async def upload_analysis_image(

@@ -29,10 +29,20 @@ else:
     # We are running in a normal Python environment
     base_dir = Path(__file__).resolve().parent.parent.parent.parent
 
-UPLOAD_DIR = os.path.join(base_dir, 'uploads')
+# For packaged app, use the persistent uploads directory
+if getattr(sys, 'frozen', False):
+    HOME_DIR = os.path.expanduser("~")
+    PERSISTENT_DIR = os.path.join(HOME_DIR, '.pivotal')
+    UPLOAD_DIR = os.path.join(PERSISTENT_DIR, 'uploads')
+else:
+    UPLOAD_DIR = os.path.join(base_dir, 'uploads')
+
+# Create directory if it doesn't exist
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
     print(f"Created uploads directory in patients route: {UPLOAD_DIR}")
+else:
+    print(f"Using existing uploads directory: {UPLOAD_DIR}")
 
 # Compatibility model for old frontend format
 class OldPatientCreate(BaseModel):

@@ -128,7 +128,15 @@ async def spa_fallback(request: Request, exc):
     return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 # Check if the uploads and frontend directories exist before mounting
-if os.path.exists(UPLOAD_DIR):
+# For packaged app, use the persistent uploads directory
+if getattr(sys, 'frozen', False):
+    HOME_DIR = os.path.expanduser("~")
+    PERSISTENT_DIR = os.path.join(HOME_DIR, '.pivotal')
+    PERSISTENT_UPLOAD_DIR = os.path.join(PERSISTENT_DIR, 'uploads')
+    os.makedirs(PERSISTENT_UPLOAD_DIR, exist_ok=True)
+    print(f"Mounting files from persistent uploads directory: {PERSISTENT_UPLOAD_DIR}")
+    app.mount("/files", StaticFiles(directory=PERSISTENT_UPLOAD_DIR), name="files")
+elif os.path.exists(UPLOAD_DIR):
     app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
 else:
     print(f"WARNING: Uploads directory does not exist: {UPLOAD_DIR}")
