@@ -17,6 +17,7 @@ from ...models.patient import Patient, PatientCreate, PatientInDB, PatientUpdate
 from ...models.medical_history import VisitHistory, FileReference, VisitHistoryCreate, VisitHistoryInDB, FileReferenceSchema
 from ...core.database import get_db
 from app.core.config import settings
+from app.core.dicom_utils import convert_dicom_to_png
 
 router = APIRouter()
 
@@ -43,6 +44,18 @@ if not os.path.exists(UPLOAD_DIR):
     print(f"Created uploads directory in patients route: {UPLOAD_DIR}")
 else:
     print(f"Using existing uploads directory: {UPLOAD_DIR}")
+
+# Create separate directories for DICOM and regular images
+DICOM_DIR = os.path.join(UPLOAD_DIR, 'dicom')
+IMAGE_DIR = os.path.join(UPLOAD_DIR, 'image')
+
+if not os.path.exists(DICOM_DIR):
+    os.makedirs(DICOM_DIR)
+    print(f"Created DICOM directory: {DICOM_DIR}")
+
+if not os.path.exists(IMAGE_DIR):
+    os.makedirs(IMAGE_DIR)
+    print(f"Created image directory: {IMAGE_DIR}")
 
 # Compatibility model for old frontend format
 class OldPatientCreate(BaseModel):
@@ -320,6 +333,7 @@ async def upload_file(
     patientUid: str = Form(...),
     doctor_name: str = Form(...),
     notes: Optional[str] = Form(default=None),
+    is_dicom: bool = Form(default=False),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -335,50 +349,125 @@ async def upload_file(
             'image/jpeg': 'xray',
             'image/jpg': 'xray',
             'application/dicom': 'xray',
+            'image/x-dicom': 'xray',  # Additional MIME type for DICOM
             'application/pdf': 'report'
         }
         
-        if file.content_type not in allowed_types:
+        if file.content_type not in allowed_types and not is_dicom:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid file type: {file.content_type}. Allowed types are: {', '.join(allowed_types.keys())}"
             )
 
-        # Create a unique filename
+        # Create a unique timestamp
         timestamp = datetime.utcnow().timestamp()
-        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._-")
-        filename = f"{patientUid}_{timestamp}_{safe_filename}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
         
-        # Create URL for accessing via the /files endpoint
-        file_url = f"/files/{filename}"
+        # Read file content
+        content = await file.read()
         
-        try:
+        # Handle DICOM files specially
+        if is_dicom or file.content_type in ['application/dicom', 'image/x-dicom']:
+            try:
+                # Convert DICOM to PNG
+                png_data, _, metadata = convert_dicom_to_png(content, patientUid)
+                
+                # Create consistent filenames with uid and timestamp
+                dicom_filename = f"{patientUid}_{timestamp}_original.dcm"
+                png_filename = f"{patientUid}_{timestamp}.png"
+                
+                # Save original DICOM file
+                dicom_path = os.path.join(DICOM_DIR, dicom_filename)
+                with open(dicom_path, "wb") as buffer:
+                    buffer.write(content)
+                
+                # Save converted PNG
+                png_path = os.path.join(IMAGE_DIR, png_filename)
+                with open(png_path, "wb") as buffer:
+                    buffer.write(png_data)
+                
+                # Use the PNG for display purposes
+                filename = png_filename
+                
+                # Create URL paths for references
+                file_url = f"/files/image/{filename}"
+                dicom_reference = f"dicom/{dicom_filename}"
+                
+                # Get metadata
+                patient_id = metadata.get('patient_id', 'Unknown')
+                modality = metadata.get('modality', 'Unknown')
+                
+                print(f"File URL: {file_url}")
+                print(f"Saved DICOM to: {dicom_path}")
+                print(f"Saved PNG to: {png_path}")
+                
+                # Create file reference with additional DICOM info
+                db_file = FileReference(
+                    patient_uid=patientUid,
+                    file_type='xray',
+                    file_name=filename,
+                    file_path=file_url,
+                    upload_date=datetime.utcnow(),
+                    uploaded_by=current_user.email,
+                    doctor_name=doctor_name,
+                    notes=f"{notes or ''} [DICOM: {dicom_reference}] [Patient ID: {patient_id}] [Modality: {modality}]"
+                )
+                
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error processing DICOM file: {str(e)}"
+                )
+        else:
+            # Regular file handling
+            # Create a unique filename with uid and timestamp
+            safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._-")
+            filename = f"{patientUid}_{timestamp}_{safe_filename}"
+            
+            # Store in the image directory
+            file_path = os.path.join(IMAGE_DIR, filename)
+            
+            # Create URL for accessing via the /files endpoint
+            file_url = f"/files/image/{filename}"
+            
+            print(f"File URL: {file_url}")
+            print(f"Saved image to: {file_path}")
+            
             # Save the file
-            content = await file.read()
             with open(file_path, "wb") as buffer:
                 buffer.write(content)
             
             # Create file reference
             db_file = FileReference(
                 patient_uid=patientUid,
-                file_type=allowed_types[file.content_type],
+                file_type=allowed_types.get(file.content_type, 'document'),
                 file_name=filename,
-                file_path=file_url,  # Store URL path instead of filesystem path
+                file_path=file_url,
                 upload_date=datetime.utcnow(),
                 uploaded_by=current_user.email,
                 doctor_name=doctor_name,
                 notes=notes
             )
-            
+        
+        try:
             db.add(db_file)
             db.commit()
             db.refresh(db_file)
+            
+            # Create a fully qualified URL for frontend preview
+            if getattr(sys, 'frozen', False):
+                # Production build - use the base URL from settings
+                base_url = "http://localhost:8000"  # This should ideally come from settings
+            else:
+                # Development
+                base_url = "http://localhost:8000"
+                
+            preview_url = f"{base_url}{file_url}"
             
             return {
                 "id": db_file.id,
                 "filename": filename,
                 "file_url": file_url,
+                "preview_url": preview_url,
                 "file_type": db_file.file_type,
                 "upload_date": db_file.upload_date,
                 "patient_uid": patientUid,
@@ -386,13 +475,10 @@ async def upload_file(
             }
             
         except Exception as e:
-            # Clean up the file if something goes wrong
-            if os.path.exists(file_path):
-                os.remove(file_path)
             db.rollback()
             raise HTTPException(
                 status_code=500,
-                detail=f"Error saving file: {str(e)}"
+                detail=f"Error saving file reference: {str(e)}"
             )
             
     except HTTPException as he:
@@ -425,23 +511,32 @@ async def download_file(
     if not file_ref:
         raise HTTPException(status_code=404, detail="File not found")
     
-    # Extract the filename from the stored URL path
-    filename = os.path.basename(file_ref.file_path)
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    # Extract the directory and filename from the stored URL path
+    url_parts = file_ref.file_path.strip('/').split('/')
+    if len(url_parts) >= 3 and url_parts[0] == "files":
+        dir_name = url_parts[1]  # "image" or "dicom"
+        filename = url_parts[2]
+        file_path = os.path.join(UPLOAD_DIR, dir_name, filename)
+    else:
+        # Handle legacy file paths
+        filename = os.path.basename(file_ref.file_path)
+        file_path = os.path.join(UPLOAD_DIR, filename)
+        # If not found, try the image directory
+        if not os.path.exists(file_path):
+            file_path = os.path.join(IMAGE_DIR, filename)
     
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
     
-    # Determine content type based on file type
+    # Determine content type based on file extension
     content_type = None
-    if file_ref.file_type == "xray":
-        if file_path.lower().endswith(('.jpg', '.jpeg')):
-            content_type = "image/jpeg"
-        elif file_path.lower().endswith('.png'):
-            content_type = "image/png"
-        elif file_path.lower().endswith('.dcm'):
-            content_type = "application/dicom"
-    elif file_ref.file_type == "report":
+    if file_path.lower().endswith(('.jpg', '.jpeg')):
+        content_type = "image/jpeg"
+    elif file_path.lower().endswith('.png'):
+        content_type = "image/png"
+    elif file_path.lower().endswith('.dcm'):
+        content_type = "application/dicom"
+    elif file_path.lower().endswith('.pdf'):
         content_type = "application/pdf"
     
     if not content_type:
@@ -468,4 +563,5 @@ async def get_patient_files(
         raise HTTPException(status_code=403, detail="Not authorized to view this patient's files")
     
     files = db.query(FileReference).filter(FileReference.patient_uid == uid).all()
+    print(str(files) + "files of patient " + uid)
     return files 

@@ -133,10 +133,28 @@ if getattr(sys, 'frozen', False):
     HOME_DIR = os.path.expanduser("~")
     PERSISTENT_DIR = os.path.join(HOME_DIR, '.pivotal')
     PERSISTENT_UPLOAD_DIR = os.path.join(PERSISTENT_DIR, 'uploads')
+    
+    # Make sure directories exist
     os.makedirs(PERSISTENT_UPLOAD_DIR, exist_ok=True)
+    
+    # Create image and dicom subdirectories if they don't exist
+    PERSISTENT_IMAGE_DIR = os.path.join(PERSISTENT_UPLOAD_DIR, 'image')
+    PERSISTENT_DICOM_DIR = os.path.join(PERSISTENT_UPLOAD_DIR, 'dicom')
+    os.makedirs(PERSISTENT_IMAGE_DIR, exist_ok=True)
+    os.makedirs(PERSISTENT_DICOM_DIR, exist_ok=True)
+    
     print(f"Mounting files from persistent uploads directory: {PERSISTENT_UPLOAD_DIR}")
+    
+    # Mount the uploads directory and its subdirectories
     app.mount("/files", StaticFiles(directory=PERSISTENT_UPLOAD_DIR), name="files")
 elif os.path.exists(UPLOAD_DIR):
+    # In development mode, create subdirectories if they don't exist
+    IMAGE_DIR = os.path.join(UPLOAD_DIR, 'image')
+    DICOM_DIR = os.path.join(UPLOAD_DIR, 'dicom')
+    os.makedirs(IMAGE_DIR, exist_ok=True)
+    os.makedirs(DICOM_DIR, exist_ok=True)
+    
+    # Mount the uploads directory
     app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
 else:
     print(f"WARNING: Uploads directory does not exist: {UPLOAD_DIR}")
@@ -163,7 +181,7 @@ if __name__ == "__main__":
     # Try the specified port, if busy try alternatives (8000, 8080, 8888, 9000)
     ports_to_try = [args.port]
     if args.port == default_port:
-        ports_to_try.extend([8080, 8888, 9000])
+        ports_to_try.extend([])
     
     for port in ports_to_try:
         try:

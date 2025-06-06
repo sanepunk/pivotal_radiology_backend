@@ -11,3 +11,5 @@ dist/
 dist1/
 *.spec
 build/
+
+*.db
