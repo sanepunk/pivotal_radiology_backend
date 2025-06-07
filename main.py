@@ -160,7 +160,7 @@ else:
     print(f"WARNING: Uploads directory does not exist: {UPLOAD_DIR}")
 
 if os.path.exists(FRONTEND_DIST):
-    app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+    app.mount("/app", StaticFiles(directory=FRONTEND_DIST, html=True, check_dir=False), name="frontend")
 else:
     print(f"WARNING: Frontend directory does not exist: {FRONTEND_DIST}")
 
@@ -192,7 +192,7 @@ if __name__ == "__main__":
             
             # Port is available, run the app
             print(f"Starting server on port {port}")
-            print(f"Open your browser to http://localhost:{port}")
+            print(f"Open your browser to http://127.0.0.1:{port}")
             uvicorn.run(app, host="127.0.0.1", port=port, workers=1)
             break
         except OSError:

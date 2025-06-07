@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import APIRouter, HTTPException, Depends, status, Form
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 from typing import Optional, List
 from jose import JWTError, jwt
@@ -106,17 +106,31 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
         )
 
 @router.post("/login", response_model=Token)
-async def login(form_data: UserLogin, db: Session = Depends(get_db)):
-    user = await authenticate_user(db, form_data.email, form_data.password)
-    if not user:
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    try:
+        print(f"Login attempt with username: {form_data.username}")
+        
+        user = await authenticate_user(db, form_data.username, form_data.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        access_token = create_access_token(data={"sub": user.email})
+        return Token(access_token=access_token, token_type="bearer")
+    except Exception as e:
+        print(f"Login error details: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login failed: {str(e)}"
         )
-    
-    access_token = create_access_token(data={"sub": user.email})
-    return Token(access_token=access_token, token_type="bearer")
 
 @router.get("/verify", response_model=UserResponse)
 async def verify_token(current_user: User = Depends(get_current_user)):
