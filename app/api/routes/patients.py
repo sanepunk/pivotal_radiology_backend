@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from ..dependencies import get_db
 from app.models.user import User
 from app.api.routes.auth import get_current_user
-from ...models.patient import Patient, PatientCreate, PatientInDB, PatientUpdate, PatientImageSchema, Contact, Insurance
+from ...models.patient import Patient, PatientCreate, PatientInDB, PatientUpdate, PatientImageSchema, Contact, Insurance, PatientImage
 from ...models.medical_history import VisitHistory, FileReference, VisitHistoryCreate, VisitHistoryInDB, FileReferenceSchema
 from ...core.database import get_db
 from app.core.config import settings
@@ -171,7 +171,7 @@ async def get_all_patients(
     db: Session = Depends(get_db)
 ):
     try:
-        stmt = select(Patient)
+        stmt = select(Patient).order_by(Patient.created_at.desc())
         
         # If not admin, only return patients created by this user
         if current_user.role != "admin":
