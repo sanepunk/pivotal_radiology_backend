@@ -7,3 +7,9 @@ __pycache__
 *.pyz
 *.pywz
 /uploads
+dist/
+dist1/
+build/
+*.db
+*.spec
+backup11/
