@@ -13,3 +13,6 @@ dist1/
 build/
 
 *.db
+.idea/
+*.pth
+*.pt

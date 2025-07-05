@@ -18,6 +18,7 @@ from ...models.medical_history import VisitHistory, FileReference, VisitHistoryC
 from ...core.database import get_db
 from app.core.config import settings
 from app.core.dicom_utils import convert_dicom_to_png
+from app.core.tb_model import tb_model
 
 router = APIRouter()
 
@@ -396,11 +397,11 @@ async def upload_file(
                 patient_id = metadata.get('patient_id', 'Unknown')
                 modality = metadata.get('modality', 'Unknown')
                 
-                print(f"File URL: {file_url}")
-                print(f"Saved DICOM to: {dicom_path}")
-                print(f"Saved PNG to: {png_path}")
+                # Get TB prediction
+                tb_prediction = tb_model.predict(png_path)
+                print(tb_prediction)
                 
-                # Create file reference with additional DICOM info
+                # Create file reference with additional DICOM info and TB prediction
                 db_file = FileReference(
                     patient_uid=patientUid,
                     file_type='xray',
@@ -409,7 +410,7 @@ async def upload_file(
                     upload_date=datetime.utcnow(),
                     uploaded_by=current_user.email,
                     doctor_name=doctor_name,
-                    notes=f"{notes or ''} [DICOM: {dicom_reference}] [Patient ID: {patient_id}] [Modality: {modality}]"
+                    notes=f"{notes or ''} [DICOM: {dicom_reference}] [Patient ID: {patient_id}] [Modality: {modality}] [TB Prediction: {tb_prediction['result']} ({tb_prediction['confidence']*100:.2f}%)]"
                 )
                 
             except Exception as e:
@@ -429,14 +430,19 @@ async def upload_file(
             # Create URL for accessing via the /files endpoint
             file_url = f"/files/image/{filename}"
             
-            print(f"File URL: {file_url}")
-            print(f"Saved image to: {file_path}")
-            
             # Save the file
             with open(file_path, "wb") as buffer:
                 buffer.write(content)
             
-            # Create file reference
+            # Get TB prediction for image files
+            tb_prediction = None
+            if file.content_type in ['image/png', 'image/jpeg', 'image/jpg']:
+                try:
+                    tb_prediction = tb_model.predict(file_path)
+                except Exception as e:
+                    print(f"Error getting TB prediction: {str(e)}")
+            
+            # Create file reference with TB prediction if available
             db_file = FileReference(
                 patient_uid=patientUid,
                 file_type=allowed_types.get(file.content_type, 'document'),
@@ -445,7 +451,7 @@ async def upload_file(
                 upload_date=datetime.utcnow(),
                 uploaded_by=current_user.email,
                 doctor_name=doctor_name,
-                notes=notes
+                notes=f"{notes or ''} {f'[TB Prediction: {tb_prediction['result']} ({tb_prediction['confidence']*100:.2f}%)]' if tb_prediction else ''}"
             )
         
         try:
@@ -471,7 +477,8 @@ async def upload_file(
                 "file_type": db_file.file_type,
                 "upload_date": db_file.upload_date,
                 "patient_uid": patientUid,
-                "doctor_name": doctor_name
+                "doctor_name": doctor_name,
+                "tb_prediction": tb_prediction if tb_prediction else None
             }
             
         except Exception as e:
