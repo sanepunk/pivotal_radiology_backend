@@ -6,3 +6,13 @@ __pycache__
 *.pyw
 *.pyz
 *.pywz
+/uploads
+dist/
+dist1/
+*.spec
+build/
+
+*.db
+.idea/
+*.pth
+*.pt
