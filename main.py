@@ -3,11 +3,33 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from starlette.middleware.cors import CORSMiddleware
+
+class CORSFileResponse(FileResponse):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.headers["Access-Control-Allow-Origin"] = "*"
+        self.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        self.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        self.headers["Access-Control-Allow-Credentials"] = "true"
+        self.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+
+class ImageStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if isinstance(response, FileResponse):
+            return CORSFileResponse(
+                response.path,
+                filename=response.filename,
+                media_type=response.media_type,
+                stat_result=response.stat_result,
+            )
+        return response
 import os
 import shutil
 from dotenv import load_dotenv
 from pathlib import Path
-
 from app.core.config import settings
 from app.api.routes import auth, patients, analysis
 from app.core.database import Base, engine
@@ -29,10 +51,11 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Type", "Authorization"],
 )
 
 # Determine base directory for file storage
@@ -137,25 +160,56 @@ if getattr(sys, 'frozen', False):
     # Make sure directories exist
     os.makedirs(PERSISTENT_UPLOAD_DIR, exist_ok=True)
     
-    # Create image and dicom subdirectories if they don't exist
-    PERSISTENT_IMAGE_DIR = os.path.join(PERSISTENT_UPLOAD_DIR, 'image')
-    PERSISTENT_DICOM_DIR = os.path.join(PERSISTENT_UPLOAD_DIR, 'dicom')
-    os.makedirs(PERSISTENT_IMAGE_DIR, exist_ok=True)
-    os.makedirs(PERSISTENT_DICOM_DIR, exist_ok=True)
+    # Create all necessary subdirectories for uploads and analysis outputs
+    subdirs = [
+        'image',           # Input images
+        'dicom',           # Input DICOM files
+        'predictions_tb',  # TB prediction outputs
+        'predictions_tb/temp_converted',  # Temporary converted files
+        'segmentation_masks',  # Lung segmentation masks
+        'cam_overlays',    # CAM visualization overlays
+        'heatmap_overlays', # Heatmap overlays
+        '3d_renderings',   # 3D visualization outputs
+        'severity_overlays', # Severity analysis overlays
+        'models',          # Model files storage
+        'analysis_results', # General analysis results
+        'reports'          # Generated reports
+    ]
+    
+    for subdir in subdirs:
+        dir_path = os.path.join(PERSISTENT_UPLOAD_DIR, subdir)
+        os.makedirs(dir_path, exist_ok=True)
+        print(f"Created directory: {dir_path}")
     
     print(f"Mounting files from persistent uploads directory: {PERSISTENT_UPLOAD_DIR}")
     
     # Mount the uploads directory and its subdirectories
-    app.mount("/files", StaticFiles(directory=PERSISTENT_UPLOAD_DIR), name="files")
+    app.mount("/files", ImageStaticFiles(directory=PERSISTENT_UPLOAD_DIR), name="files")
 elif os.path.exists(UPLOAD_DIR):
-    # In development mode, create subdirectories if they don't exist
-    IMAGE_DIR = os.path.join(UPLOAD_DIR, 'image')
-    DICOM_DIR = os.path.join(UPLOAD_DIR, 'dicom')
-    os.makedirs(IMAGE_DIR, exist_ok=True)
-    os.makedirs(DICOM_DIR, exist_ok=True)
+    # In development mode, create all necessary subdirectories
+    subdirs = [
+        'image',           # Input images
+        'dicom',           # Input DICOM files
+        'predictions_tb',  # TB prediction outputs
+        'predictions_tb/temp_converted',  # Temporary converted files
+        'segmentation_masks',  # Lung segmentation masks
+        'cam_overlays',    # CAM visualization overlays
+        'heatmap_overlays', # Heatmap overlays
+        '3d_renderings',   # 3D visualization outputs
+        'severity_overlays', # Severity analysis overlays
+        'models',          # Model files storage
+        'analysis_results', # General analysis results
+        'reports'          # Generated reports
+    ]
+    
+    for subdir in subdirs:
+        dir_path = os.path.join(UPLOAD_DIR, subdir)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+            print(f"Created directory: {dir_path}")
     
     # Mount the uploads directory
-    app.mount("/files", StaticFiles(directory=UPLOAD_DIR), name="files")
+    app.mount("/files", ImageStaticFiles(directory=UPLOAD_DIR), name="files")
 else:
     print(f"WARNING: Uploads directory does not exist: {UPLOAD_DIR}")
 

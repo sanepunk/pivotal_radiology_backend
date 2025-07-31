@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = f"sqlite:///{BASE_DIR / 'pivotal.db'}"
     
     # JWT Settings
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-for-jwt")
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "270f2275b34d7e3eb83b851c631e27aae654e7603ab6b2be83ace1438dfbc516")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     

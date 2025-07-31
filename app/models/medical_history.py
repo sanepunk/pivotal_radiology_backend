@@ -55,6 +55,14 @@ class FileReference(Base):
     uploaded_by = Column(String, ForeignKey("users.email"), nullable=False)
     doctor_name = Column(String, nullable=False)
     
+    # TB analysis result file paths
+    severity_overlay = Column(String, nullable=True)
+    segmentation_mask = Column(String, nullable=True)
+    heatmap_overlay = Column(String, nullable=True)
+    cam_overlay = Column(String, nullable=True)
+    rendering_3d = Column(String, nullable=True)
+    rendering_png = Column(String, nullable=True)
+    
     # Define relationships
     visit = relationship("VisitHistory", back_populates="files")
     uploader = relationship("User", foreign_keys=[uploaded_by])
@@ -98,6 +106,13 @@ class FileReferenceSchema(BaseModel):
     notes: Optional[str] = None
     uploaded_by: str  
     doctor_name: str
+    
+    # TB analysis result fields
+    severity_overlay: Optional[str] = None
+    segmentation_mask: Optional[str] = None
+    heatmap_overlay: Optional[str] = None
+    cam_overlay: Optional[str] = None
+    rendering_3d: Optional[str] = None
     
     class Config:
         from_attributes = True
